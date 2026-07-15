@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Painel de Clima — ESP32</title>
+
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #141b24;
+    --panel-border: #23303d;
+    --text: #e8edf2;
+    --muted: #7c8a99;
+    --temp: #ff8a5c;
+    --hum: #4fc3f7;
+    --mono: 'IBM Plex Mono', 'Courier New', monospace;
+    --sans: 'Inter', -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    padding: 32px 20px;
+  }
+
+  .wrap { max-width: 920px; margin: 0 auto; }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 12px;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 20px;
+    margin-bottom: 28px;
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .status {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #444;
+    transition: background 0.3s;
+  }
+  .dot.live { background: #3ddc84; box-shadow: 0 0 8px #3ddc8480; }
+
+  .cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+
+  .card .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
+  .card .value {
+    font-size: 40px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+
+  .card.temp .value { color: var(--temp); }
+  .card.hum .value { color: var(--hum); }
+
+  .card .unit { font-size: 20px; font-weight: 400; color: var(--muted); }
+
+  .chart-panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+
+  .chart-panel .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+
+  canvas { max-height: 340px; }
+
+  .empty {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .config-note {
+    margin-top: 24px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>Painel de Clima</h1>
+    <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">conectando...</span></div>
+  </header>
+
+  <div class="cards">
+    <div class="card temp">
+      <div class="label">Temperatura</div>
+      <div class="value" id="tempNow">--<span class="unit">°C</span></div>
+    </div>
+    <div class="card hum">
+      <div class="label">Umidade</div>
+      <div class="value" id="humNow">--<span class="unit">%</span></div>
+    </div>
+  </div>
+
+  <div class="chart-panel">
+    <div class="label">Histórico</div>
+    <canvas id="chart"></canvas>
+    <div class="empty" id="emptyMsg" style="display:none;">
+      Nenhum histórico encontrado em /sensor/historico ainda.<br>
+      Verifique se o ESP32 está gravando nesse caminho.
+    </div>
+  </div>
+
+  <div class="config-note">
+    Configuração ativa: <span id="dbUrlShown"></span>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+
+<script>
+  // ======== CONFIGURE AQUI (mesmos dados do seu ESP32) ========
+  const firebaseConfig = {
+    apiKey: "AIzaSyBc_Muebv5qcDu-Se-xBYOGaSt32MYmqdE",
+    databaseURL: "https://projeto-esp-d6c1d-default-rtdb.firebaseio.com/"
+  };
+  // =============================================================
+
+  document.getElementById('dbUrlShown').textContent = firebaseConfig.databaseURL;
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const tempNow = document.getElementById('tempNow');
+  const humNow = document.getElementById('humNow');
+  const emptyMsg = document.getElementById('emptyMsg');
+
+  // Valores atuais (/sensor/temperatura e /sensor/umidade)
+  db.ref('/sensor/temperatura').on('value', snap => {
+    const v = snap.val();
+    if (v !== null) tempNow.innerHTML = Number(v).toFixed(1) + '<span class="unit">°C</span>';
+  });
+  db.ref('/sensor/umidade').on('value', snap => {
+    const v = snap.val();
+    if (v !== null) humNow.innerHTML = Number(v).toFixed(0) + '<span class="unit">%</span>';
+  });
+
+  db.ref('.info/connected').on('value', snap => {
+    if (snap.val() === true) {
+      statusDot.classList.add('live');
+      statusText.textContent = 'ao vivo';
+    } else {
+      statusDot.classList.remove('live');
+      statusText.textContent = 'desconectado';
+    }
+  });
+
+  // Gráfico com histórico (/sensor/historico/{timestamp}/{temperatura,umidade})
+  const ctx = document.getElementById('chart').getContext('2d');
+  let chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'Temperatura (°C)',
+          data: [],
+          borderColor: '#ff8a5c',
+          backgroundColor: '#ff8a5c20',
+          tension: 0.3,
+          pointRadius: 2,
+          yAxisID: 'yTemp',
+        },
+        {
+          label: 'Umidade (%)',
+          data: [],
+          borderColor: '#4fc3f7',
+          backgroundColor: '#4fc3f720',
+          tension: 0.3,
+          pointRadius: 2,
+          yAxisID: 'yHum',
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { color: '#7c8a99', maxTicksLimit: 8 }, grid: { color: '#23303d' } },
+        yTemp: {
+          position: 'left',
+          ticks: { color: '#ff8a5c' },
+          grid: { color: '#23303d' },
+          title: { display: true, text: '°C', color: '#ff8a5c' }
+        },
+        yHum: {
+          position: 'right',
+          ticks: { color: '#4fc3f7' },
+          grid: { display: false },
+          title: { display: true, text: '%', color: '#4fc3f7' }
+        }
+      },
+      plugins: {
+        legend: { labels: { color: '#e8edf2' } }
+      }
+    }
+  });
+
+  // Limita a quantidade de pontos mostrados (últimos N)
+  const MAX_POINTS = 50;
+
+  db.ref('/sensor/historico').limitToLast(MAX_POINTS).on('value', snap => {
+    const data = snap.val();
+    if (!data) {
+      emptyMsg.style.display = 'block';
+      return;
+    }
+    emptyMsg.style.display = 'none';
+
+    const entries = Object.entries(data).sort((a, b) => Number(a[0]) - Number(b[0]));
+
+    const labels = entries.map(([ts]) => {
+      const n = Number(ts);
+      // Se o timestamp parecer ser epoch em segundos (10 dígitos), formata como hora real
+      if (ts.length === 10) {
+        const d = new Date(n * 1000);
+        return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+      // Caso contrário (millis() do ESP32 desde ligar), mostra segundos decorridos
+      return (n / 1000).toFixed(0) + 's';
+    });
+
+    const temps = entries.map(([, v]) => v.temperatura ?? null);
+    const hums = entries.map(([, v]) => v.umidade ?? null);
+
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = temps;
+    chart.data.datasets[1].data = hums;
+    chart.update();
+  });
+</script>
+
+</body>
+</html>
